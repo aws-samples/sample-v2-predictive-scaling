@@ -1,0 +1,279 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Automate Aurora Serverless V2 Pre-Warm and Cool Down with Lambda, CloudWatch Events, and Resource Tags
+
+Parameters:
+  PreWarmFunctionName:
+    Type: String
+    Default: "PreWarmFunction"
+    Description: Name of the Pre-Warm Lambda function.
+
+  CoolDownFunctionName:
+    Type: String
+    Default: "CoolDownFunction"
+    Description: Name of the Cool Down Lambda function.
+
+  PreWarmScheduleExpression:
+    Type: String
+    Default: "cron(0 5 * * ? *)" # Default to pre-warm at 5:00 AM UTC
+    Description: Cron expression for the pre-warm schedule of Aurora Serverless V2 in UTC.
+
+  CoolDownScheduleExpression:
+    Type: String
+    Default: "cron(0 23 * * ? *)" # Default to cool down at 11:00 PM UTC
+    Description: Cron expression for the cool down schedule of Aurora Serverless V2 in UTC.
+
+  PreWarmMinACU:
+    Type: Number
+    Default: 8
+    Description: Minimum ACU to set for pre-warming the Aurora Serverless V2 cluster.
+
+  PreWarmMaxACU:
+    Type: Number
+    Default: 64
+    Description: Maximum ACU to set for pre-warming the Aurora Serverless V2 cluster.
+
+  CoolDownMinACU:
+    Type: Number
+    Default: 2
+    Description: Minimum ACU to set for cooling down the Aurora Serverless V2 cluster.
+
+  CoolDownMaxACU:
+    Type: Number
+    Default: 32
+    Description: Maximum ACU to set for cooling down the Aurora Serverless V2 cluster.
+
+Resources:
+  PreWarmRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PreWarmRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: PreWarmPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource:
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${PreWarmFunctionName}:*"
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${PreWarmFunctionName}"
+              - Effect: Allow
+                Action:
+                  - "rds:DescribeDBClusters"
+                  - "rds:ListTagsForResource"
+                Resource: "*"
+              - Effect: Allow
+                Action: "rds:ModifyDBCluster"
+                Resource: !Sub "arn:aws:rds:*:${AWS::AccountId}:cluster:*"
+                Condition:
+                  StringEquals:
+                    "rds:cluster-tag/prewarm": "yes"
+
+  CoolDownRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: CoolDownRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CoolDownPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource:
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${CoolDownFunctionName}:*"
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${CoolDownFunctionName}"
+              - Effect: Allow
+                Action:
+                  - "rds:DescribeDBClusters"
+                  - "rds:ListTagsForResource"
+                Resource: "*"
+              - Effect: Allow
+                Action: "rds:ModifyDBCluster"
+                Resource: !Sub "arn:aws:rds:*:${AWS::AccountId}:cluster:*"
+                Condition:
+                  StringEquals:
+                    "rds:cluster-tag/cooldown": "yes"
+
+  PreWarmFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref PreWarmFunctionName
+      Handler: index.lambda_handler
+      Role: !GetAtt PreWarmRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import os  # Import the os module
+
+          # Initialize the RDS client
+          client = boto3.client('rds')
+
+          def lambda_handler(event, context):
+              clusters = client.describe_db_clusters()
+              
+              for cluster in clusters['DBClusters']:
+                  # Log basic cluster information
+                  print(f"Cluster ID: {cluster['DBClusterIdentifier']}, Engine: {cluster['Engine']}")
+
+                  # Check if ServerlessV2ScalingConfiguration is present to determine if the cluster is Serverless V2
+                  if 'ServerlessV2ScalingConfiguration' in cluster:
+                      print(f"Found Serverless V2 Cluster: {cluster['DBClusterIdentifier']}")
+
+                      # List tags for the cluster
+                      tags = client.list_tags_for_resource(ResourceName=cluster['DBClusterArn'])['TagList']
+                      
+                      # Check if the 'prewarm' tag is set to 'yes'
+                      if any(tag['Key'] == 'prewarm' and tag['Value'] == 'yes' for tag in tags):
+                          # Fetch the min and max capacity from environment variables
+                          min_capacity = int(os.environ.get('MIN_CAPACITY', '8'))  # Default to 8 if not set
+                          max_capacity = int(os.environ.get('MAX_CAPACITY', '64'))  # Default to 64 if not set
+                          try:
+                            # Modify the Serverless V2 scaling configuration
+                            response = client.modify_db_cluster(
+                                DBClusterIdentifier=cluster['DBClusterIdentifier'],
+                                ServerlessV2ScalingConfiguration={
+                                    'MinCapacity': min_capacity,
+                                    'MaxCapacity': max_capacity
+                                },
+                                ApplyImmediately=True
+                            )
+                            print(f"Configured Serverless V2 scaling settings for {cluster['DBClusterIdentifier']} to MinCapacity: {min_capacity} and MaxCapacity: {max_capacity}")
+                          except Exception as e:
+                            # Catch-all for any other exceptions not specified
+                            print(f"An unexpected error occurred while modifying {cluster['DBClusterIdentifier']}: {e}")
+      Runtime: python3.12
+      Timeout: 30
+      Environment:
+        Variables:
+          MIN_CAPACITY: !Ref PreWarmMinACU
+          MAX_CAPACITY: !Ref PreWarmMaxACU
+
+  CoolDownFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref CoolDownFunctionName
+      Handler: index.lambda_handler
+      Role: !GetAtt CoolDownRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import os  # Import the os module
+
+          # Initialize the RDS client
+          client = boto3.client('rds')
+
+          def lambda_handler(event, context):
+              # Read the min and max capacity from environment variables with defaults
+              min_capacity = int(os.environ.get('MIN_CAPACITY', '2'))  # Default to 2 if not set
+              max_capacity = int(os.environ.get('MAX_CAPACITY', '16'))  # Default to 16 if not set
+
+              clusters = client.describe_db_clusters()
+              for cluster in clusters['DBClusters']:
+                  # Check for serverless instances; assuming all serverless instances are V2 for this example
+                  if 'ServerlessV2ScalingConfiguration' in cluster:
+                      tags = client.list_tags_for_resource(ResourceName=cluster['DBClusterArn'])['TagList']
+                      if any(tag['Key'] == 'cooldown' and tag['Value'] == 'yes' for tag in tags):
+                          # Modify the DB cluster with the new Serverless V2 scaling configuration for cooldown
+                          try:
+                            response = client.modify_db_cluster(
+                                DBClusterIdentifier=cluster['DBClusterIdentifier'],
+                                ServerlessV2ScalingConfiguration={
+                                    'MinCapacity': min_capacity,
+                                    'MaxCapacity': max_capacity
+                                },
+                                ApplyImmediately=True
+                            )
+                            print(f"Cooled down {cluster['DBClusterIdentifier']} to MinCapacity: {min_capacity} and MaxCapacity: {max_capacity} ACUs.")
+                          except Exception as e:
+                            # Catch-all for any other exceptions not specified
+                            print(f"An unexpected error occurred while modifying {cluster['DBClusterIdentifier']}: {e}")
+      Runtime: python3.12
+      Timeout: 30
+      Environment:
+        Variables:
+          MIN_CAPACITY: !Ref CoolDownMinACU
+          MAX_CAPACITY: !Ref CoolDownMaxACU
+      
+  PreWarmRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: "PreWarmRule"
+      Description: "Schedule to pre-warm Aurora Serverless V2 clusters"
+      ScheduleExpression: !Ref PreWarmScheduleExpression
+      State: "ENABLED"
+      Targets:
+        - Arn: !GetAtt PreWarmFunction.Arn
+          Id: "PreWarmTarget"
+
+  PreWarmPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref PreWarmFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt PreWarmRule.Arn
+
+  CoolDownRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: "CoolDownRule"
+      Description: "Schedule to cool down Aurora Serverless V2 clusters"
+      ScheduleExpression: !Ref CoolDownScheduleExpression
+      State: "ENABLED"
+      Targets:
+        - Arn: !GetAtt CoolDownFunction.Arn
+          Id: "CoolDownTarget"
+
+  CoolDownPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref CoolDownFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CoolDownRule.Arn
+
+Outputs:
+  PreWarmRoleArn:
+    Description: ARN of the PreWarm IAM Role
+    Value: !GetAtt PreWarmRole.Arn
+
+  CoolDownRoleArn:
+    Description: ARN of the CoolDown IAM Role
+    Value: !GetAtt CoolDownRole.Arn
+
+  PreWarmFunctionArn:
+    Description: ARN of the PreWarm Lambda Function
+    Value: !GetAtt PreWarmFunction.Arn
+
+  CoolDownFunctionArn:
+    Description: ARN of the CoolDown Lambda Function
+    Value: !GetAtt CoolDownFunction.Arn
+
+  PreWarmRuleArn:
+    Description: ARN of the PreWarm EventBridge Rule
+    Value: !GetAtt PreWarmRule.Arn
+
+  CoolDownRuleArn:
+    Description: ARN of the CoolDown EventBridge Rule
+    Value: !GetAtt CoolDownRule.Arn
