@@ -1,52 +1,52 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Automate Aurora Serverless V2 Pre-Warm and Cool Down with Lambda, CloudWatch Events, and Resource Tags
+Description: Automate Aurora Serverless V2 Scale Up and Scale Down with Lambda, CloudWatch Events, and Resource Tags
 
 Parameters:
-  PreWarmFunctionName:
+  ScaleUpFunctionName:
     Type: String
-    Default: "PreWarmFunction"
-    Description: Name of the Pre-Warm Lambda function.
+    Default: "ScaleUpFunction"
+    Description: Name of the Scale Up Lambda function.
 
-  CoolDownFunctionName:
+  ScaleDownFunctionName:
     Type: String
-    Default: "CoolDownFunction"
-    Description: Name of the Cool Down Lambda function.
+    Default: "ScaleDownFunction"
+    Description: Name of the Scale Down Lambda function.
 
-  PreWarmScheduleExpression:
+  ScaleUpScheduleExpression:
     Type: String
-    Default: "cron(0 5 * * ? *)" # Default to pre-warm at 5:00 AM UTC
-    Description: Cron expression for the pre-warm schedule of Aurora Serverless V2 in UTC.
+    Default: "cron(0 5 * * ? *)" # Default to scale up at 5:00 AM UTC
+    Description: Cron expression for the scale up schedule of Aurora Serverless V2 in UTC.
 
-  CoolDownScheduleExpression:
+  ScaleDownScheduleExpression:
     Type: String
-    Default: "cron(0 23 * * ? *)" # Default to cool down at 11:00 PM UTC
-    Description: Cron expression for the cool down schedule of Aurora Serverless V2 in UTC.
+    Default: "cron(0 23 * * ? *)" # Default to scale down at 11:00 PM UTC
+    Description: Cron expression for the scale down schedule of Aurora Serverless V2 in UTC.
 
-  PreWarmMinACU:
+  ScaleUpMinACU:
     Type: Number
     Default: 8
-    Description: Minimum ACU to set for pre-warming the Aurora Serverless V2 cluster.
+    Description: Minimum ACU to set when scaling up the Aurora Serverless V2 cluster.
 
-  PreWarmMaxACU:
+  ScaleUpMaxACU:
     Type: Number
     Default: 64
-    Description: Maximum ACU to set for pre-warming the Aurora Serverless V2 cluster.
+    Description: Maximum ACU to set when scaling up the Aurora Serverless V2 cluster.
 
-  CoolDownMinACU:
+  ScaleDownMinACU:
     Type: Number
     Default: 2
-    Description: Minimum ACU to set for cooling down the Aurora Serverless V2 cluster.
+    Description: Minimum ACU to set when scaling down the Aurora Serverless V2 cluster.
 
-  CoolDownMaxACU:
+  ScaleDownMaxACU:
     Type: Number
     Default: 32
-    Description: Maximum ACU to set for cooling down the Aurora Serverless V2 cluster.
+    Description: Maximum ACU to set when scaling down the Aurora Serverless V2 cluster.
 
 Resources:
-  PreWarmRole:
+  ScaleUpRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: PreWarmRole
+      RoleName: ScaleUpRole
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -55,7 +55,7 @@ Resources:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       Policies:
-        - PolicyName: PreWarmPolicy
+        - PolicyName: ScaleUpPolicy
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
@@ -65,8 +65,8 @@ Resources:
                   - "logs:CreateLogStream"
                   - "logs:PutLogEvents"
                 Resource:
-                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${PreWarmFunctionName}:*"
-                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${PreWarmFunctionName}"
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ScaleUpFunctionName}:*"
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ScaleUpFunctionName}"
               - Effect: Allow
                 Action:
                   - "rds:DescribeDBClusters"
@@ -77,12 +77,12 @@ Resources:
                 Resource: !Sub "arn:aws:rds:*:${AWS::AccountId}:cluster:*"
                 Condition:
                   StringEquals:
-                    "rds:cluster-tag/prewarm": "yes"
+                    "rds:cluster-tag/scale-up": "yes"
 
-  CoolDownRole:
+  ScaleDownRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: CoolDownRole
+      RoleName: ScaleDownRole
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -91,7 +91,7 @@ Resources:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       Policies:
-        - PolicyName: CoolDownPolicy
+        - PolicyName: ScaleDownPolicy
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
@@ -101,8 +101,8 @@ Resources:
                   - "logs:CreateLogStream"
                   - "logs:PutLogEvents"
                 Resource:
-                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${CoolDownFunctionName}:*"
-                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${CoolDownFunctionName}"
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ScaleDownFunctionName}:*"
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ScaleDownFunctionName}"
               - Effect: Allow
                 Action:
                   - "rds:DescribeDBClusters"
@@ -113,14 +113,14 @@ Resources:
                 Resource: !Sub "arn:aws:rds:*:${AWS::AccountId}:cluster:*"
                 Condition:
                   StringEquals:
-                    "rds:cluster-tag/cooldown": "yes"
+                    "rds:cluster-tag/scale-down": "yes"
 
-  PreWarmFunction:
+  ScaleUpFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: !Ref PreWarmFunctionName
+      FunctionName: !Ref ScaleUpFunctionName
       Handler: index.lambda_handler
-      Role: !GetAtt PreWarmRole.Arn
+      Role: !GetAtt ScaleUpRole.Arn
       Code:
         ZipFile: |
           import boto3
@@ -143,8 +143,8 @@ Resources:
                       # List tags for the cluster
                       tags = client.list_tags_for_resource(ResourceName=cluster['DBClusterArn'])['TagList']
                       
-                      # Check if the 'prewarm' tag is set to 'yes'
-                      if any(tag['Key'] == 'prewarm' and tag['Value'] == 'yes' for tag in tags):
+                      # Check if the 'scale-up' tag is set to 'yes'
+                      if any(tag['Key'] == 'scale-up' and tag['Value'] == 'yes' for tag in tags):
                           # Fetch the min and max capacity from environment variables
                           min_capacity = int(os.environ.get('MIN_CAPACITY', '8'))  # Default to 8 if not set
                           max_capacity = int(os.environ.get('MAX_CAPACITY', '64'))  # Default to 64 if not set
@@ -163,18 +163,18 @@ Resources:
                             # Catch-all for any other exceptions not specified
                             print(f"An unexpected error occurred while modifying {cluster['DBClusterIdentifier']}: {e}")
       Runtime: python3.12
-      Timeout: 30
+      Timeout: 300
       Environment:
         Variables:
-          MIN_CAPACITY: !Ref PreWarmMinACU
-          MAX_CAPACITY: !Ref PreWarmMaxACU
+          MIN_CAPACITY: !Ref ScaleUpMinACU
+          MAX_CAPACITY: !Ref ScaleUpMaxACU
 
-  CoolDownFunction:
+  ScaleDownFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: !Ref CoolDownFunctionName
+      FunctionName: !Ref ScaleDownFunctionName
       Handler: index.lambda_handler
-      Role: !GetAtt CoolDownRole.Arn
+      Role: !GetAtt ScaleDownRole.Arn
       Code:
         ZipFile: |
           import boto3
@@ -193,8 +193,8 @@ Resources:
                   # Check for serverless instances; assuming all serverless instances are V2 for this example
                   if 'ServerlessV2ScalingConfiguration' in cluster:
                       tags = client.list_tags_for_resource(ResourceName=cluster['DBClusterArn'])['TagList']
-                      if any(tag['Key'] == 'cooldown' and tag['Value'] == 'yes' for tag in tags):
-                          # Modify the DB cluster with the new Serverless V2 scaling configuration for cooldown
+                      if any(tag['Key'] == 'scale-down' and tag['Value'] == 'yes' for tag in tags):
+                          # Modify the DB cluster with the new Serverless V2 scaling configuration for scale down
                           try:
                             response = client.modify_db_cluster(
                                 DBClusterIdentifier=cluster['DBClusterIdentifier'],
@@ -204,76 +204,76 @@ Resources:
                                 },
                                 ApplyImmediately=True
                             )
-                            print(f"Cooled down {cluster['DBClusterIdentifier']} to MinCapacity: {min_capacity} and MaxCapacity: {max_capacity} ACUs.")
+                            print(f"Scaled down {cluster['DBClusterIdentifier']} to MinCapacity: {min_capacity} and MaxCapacity: {max_capacity} ACUs.")
                           except Exception as e:
                             # Catch-all for any other exceptions not specified
                             print(f"An unexpected error occurred while modifying {cluster['DBClusterIdentifier']}: {e}")
       Runtime: python3.12
-      Timeout: 30
+      Timeout: 300
       Environment:
         Variables:
-          MIN_CAPACITY: !Ref CoolDownMinACU
-          MAX_CAPACITY: !Ref CoolDownMaxACU
+          MIN_CAPACITY: !Ref ScaleDownMinACU
+          MAX_CAPACITY: !Ref ScaleDownMaxACU
       
-  PreWarmRule:
+  ScaleUpRule:
     Type: AWS::Events::Rule
     Properties:
-      Name: "PreWarmRule"
-      Description: "Schedule to pre-warm Aurora Serverless V2 clusters"
-      ScheduleExpression: !Ref PreWarmScheduleExpression
+      Name: "ScaleUpRule"
+      Description: "Schedule to scale up Aurora Serverless V2 clusters"
+      ScheduleExpression: !Ref ScaleUpScheduleExpression
       State: "ENABLED"
       Targets:
-        - Arn: !GetAtt PreWarmFunction.Arn
-          Id: "PreWarmTarget"
+        - Arn: !GetAtt ScaleUpFunction.Arn
+          Id: "ScaleUpTarget"
 
-  PreWarmPermission:
+  ScaleUpPermission:
     Type: AWS::Lambda::Permission
     Properties:
       Action: lambda:InvokeFunction
-      FunctionName: !Ref PreWarmFunction
+      FunctionName: !Ref ScaleUpFunction
       Principal: events.amazonaws.com
-      SourceArn: !GetAtt PreWarmRule.Arn
+      SourceArn: !GetAtt ScaleUpRule.Arn
 
-  CoolDownRule:
+  ScaleDownRule:
     Type: AWS::Events::Rule
     Properties:
-      Name: "CoolDownRule"
-      Description: "Schedule to cool down Aurora Serverless V2 clusters"
-      ScheduleExpression: !Ref CoolDownScheduleExpression
+      Name: "ScaleDownRule"
+      Description: "Schedule to scale down Aurora Serverless V2 clusters"
+      ScheduleExpression: !Ref ScaleDownScheduleExpression
       State: "ENABLED"
       Targets:
-        - Arn: !GetAtt CoolDownFunction.Arn
-          Id: "CoolDownTarget"
+        - Arn: !GetAtt ScaleDownFunction.Arn
+          Id: "ScaleDownTarget"
 
-  CoolDownPermission:
+  ScaleDownPermission:
     Type: AWS::Lambda::Permission
     Properties:
       Action: lambda:InvokeFunction
-      FunctionName: !Ref CoolDownFunction
+      FunctionName: !Ref ScaleDownFunction
       Principal: events.amazonaws.com
-      SourceArn: !GetAtt CoolDownRule.Arn
+      SourceArn: !GetAtt ScaleDownRule.Arn
 
 Outputs:
-  PreWarmRoleArn:
-    Description: ARN of the PreWarm IAM Role
-    Value: !GetAtt PreWarmRole.Arn
+  ScaleUpRoleArn:
+    Description: ARN of the Scale Up IAM Role
+    Value: !GetAtt ScaleUpRole.Arn
 
-  CoolDownRoleArn:
-    Description: ARN of the CoolDown IAM Role
-    Value: !GetAtt CoolDownRole.Arn
+  ScaleDownRoleArn:
+    Description: ARN of the Scale Down IAM Role
+    Value: !GetAtt ScaleDownRole.Arn
 
-  PreWarmFunctionArn:
-    Description: ARN of the PreWarm Lambda Function
-    Value: !GetAtt PreWarmFunction.Arn
+  ScaleUpFunctionArn:
+    Description: ARN of the Scale Up Lambda Function
+    Value: !GetAtt ScaleUpFunction.Arn
 
-  CoolDownFunctionArn:
-    Description: ARN of the CoolDown Lambda Function
-    Value: !GetAtt CoolDownFunction.Arn
+  ScaleDownFunctionArn:
+    Description: ARN of the Scale Down Lambda Function
+    Value: !GetAtt ScaleDownFunction.Arn
 
-  PreWarmRuleArn:
-    Description: ARN of the PreWarm EventBridge Rule
-    Value: !GetAtt PreWarmRule.Arn
+  ScaleUpRuleArn:
+    Description: ARN of the Scale Up EventBridge Rule
+    Value: !GetAtt ScaleUpRule.Arn
 
-  CoolDownRuleArn:
-    Description: ARN of the CoolDown EventBridge Rule
-    Value: !GetAtt CoolDownRule.Arn
+  ScaleDownRuleArn:
+    Description: ARN of the Scale Down EventBridge Rule
+    Value: !GetAtt ScaleDownRule.Arn
